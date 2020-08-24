@@ -1,13 +1,18 @@
 package ghostferry
 
 import (
-	"fmt"
 	sql "github.com/Shopify/ghostferry/sqlwrapper"
-	"math"
 	"sync"
 
 	"github.com/sirupsen/logrus"
 )
+
+type PaginationKey struct {
+	table              *TableSchema
+	batchIndex         uint64
+	startPaginationKey uint64
+	endPaginationKey   uint64
+}
 
 type DataIterator struct {
 	DB                *sql.DB
@@ -18,25 +23,24 @@ type DataIterator struct {
 	CursorConfig *CursorConfig
 	StateTracker *StateTracker
 
-	targetPaginationKeys *sync.Map
-	batchListeners       []func(*RowBatch) error
-	doneListeners        []func() error
-	logger               *logrus.Entry
+	paginationKeys map[string]*PaginationKey
+	batchListeners []func(*RowBatch) error
+	doneListeners  []func() error
+	logger         *logrus.Entry
 }
 
 func (d *DataIterator) Run(tables []*TableSchema) {
 	d.logger = logrus.WithField("tag", "data_iterator")
-	d.targetPaginationKeys = &sync.Map{}
 
 	// If a state tracker is not provided, then the caller doesn't care about
 	// tracking state. However, some methods are still useful so we initialize
 	// a minimal local instance.
 	if d.StateTracker == nil {
-		d.StateTracker = NewStateTracker(0)
+		d.StateTracker = NewStateTracker()
 	}
 
 	d.logger.WithField("tablesCount", len(tables)).Info("starting data iterator run")
-	tablesWithData, emptyTables, err := MaxPaginationKeys(d.DB, tables, d.logger)
+	tablesWithData, emptyTables, err := MinMaxPaginationKeys(d.DB, tables, d.logger)
 	if err != nil {
 		d.ErrorHandler.Fatal("data_iterator", err)
 	}
@@ -45,18 +49,24 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 		d.StateTracker.MarkTableAsCompleted(table.String())
 	}
 
-	for table, maxPaginationKey := range tablesWithData {
+	d.paginationKeys = make(map[string]*PaginationKey, len(tablesWithData))
+
+	for table, keys := range tablesWithData {
 		tableName := table.String()
 		if d.StateTracker.IsTableComplete(tableName) {
 			// In a previous run, the table may have been completed.
 			// We don't need to reiterate those tables as it has already been done.
-			delete(tablesWithData, table)
-		} else {
-			d.targetPaginationKeys.Store(table.String(), maxPaginationKey)
+			d.logger.WithField("table", tableName).Warn("table already completed, skipping")
+			continue
+		}
+		d.paginationKeys[tableName] = &PaginationKey{
+			table:              table,
+			startPaginationKey: keys.MinPaginationKey,
+			endPaginationKey:   keys.MaxPaginationKey,
 		}
 	}
 
-	tablesQueue := make(chan *TableSchema)
+	batchQueue := make(chan *PaginationKey)
 	wg := &sync.WaitGroup{}
 	wg.Add(d.Concurrency)
 
@@ -65,30 +75,23 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 			defer wg.Done()
 
 			for {
-				table, ok := <-tablesQueue
+				PaginationKey, ok := <-batchQueue
 				if !ok {
 					break
 				}
 
-				logger := d.logger.WithField("table", table.String())
+				table := PaginationKey.table
+				tableName := table.String()
 
-				targetPaginationKeyInterface, found := d.targetPaginationKeys.Load(table.String())
-				if !found {
-					err := fmt.Errorf("%s not found in targetPaginationKeys, this is likely a programmer error", table.String())
-					logger.WithError(err).Error("this is definitely a bug")
-					d.ErrorHandler.Fatal("data_iterator", err)
-					return
-				}
+				batchLogger := d.logger.WithFields(logrus.Fields{
+					"table":              tableName,
+					"startPaginationKey": PaginationKey.startPaginationKey,
+					"endPaginationKey":   PaginationKey.endPaginationKey,
+					"batchIndex":         PaginationKey.batchIndex,
+				})
 
-				startPaginationKey := d.StateTracker.LastSuccessfulPaginationKey(table.String())
-				if startPaginationKey == math.MaxUint64 {
-					err := fmt.Errorf("%v has been marked as completed but a table iterator has been spawned, this is likely a programmer error which resulted in the inconsistent starting state", table.String())
-					logger.WithError(err).Error("this is definitely a bug")
-					d.ErrorHandler.Fatal("data_iterator", err)
-					return
-				}
-
-				cursor := d.CursorConfig.NewCursor(table, startPaginationKey, targetPaginationKeyInterface.(uint64))
+				batchLogger.Debug("setting up new batch cursor")
+				cursor := d.CursorConfig.NewCursor(table, PaginationKey.startPaginationKey, PaginationKey.endPaginationKey)
 				if d.SelectFingerprint {
 					if len(cursor.ColumnsToSelect) == 0 {
 						cursor.ColumnsToSelect = []string{"*"}
@@ -98,6 +101,12 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 				}
 
 				err := cursor.Each(func(batch *RowBatch) error {
+					batchValues := batch.Values()
+					paginationKeyIndex := batch.PaginationKeyIndex()
+
+					batch.batchIndex = PaginationKey.batchIndex
+
+					batchLogger.WithField("size", batch.Size()).Debug("row event")
 					metrics.Count("RowEvent", int64(batch.Size()), []MetricTag{
 						MetricTag{"table", table.Name},
 						MetricTag{"source", "table"},
@@ -107,10 +116,10 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 						fingerprints := make(map[uint64][]byte)
 						rows := make([]RowData, batch.Size())
 
-						for i, rowData := range batch.Values() {
-							paginationKey, err := rowData.GetUint64(batch.PaginationKeyIndex())
+						for i, rowData := range batchValues {
+							paginationKey, err := rowData.GetUint64(paginationKeyIndex)
 							if err != nil {
-								logger.WithError(err).Error("failed to get paginationKey data")
+								batchLogger.WithError(err).Error("failed to get paginationKey data")
 								return err
 							}
 
@@ -118,18 +127,14 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 							rows[i] = rowData[:len(rowData)-1]
 						}
 
-						batch = &RowBatch{
-							values:             rows,
-							paginationKeyIndex: batch.PaginationKeyIndex(),
-							table:              table,
-							fingerprints:       fingerprints,
-						}
+						batch.values = rows
+						batch.fingerprints = fingerprints
 					}
 
 					for _, listener := range d.batchListeners {
 						err := listener(batch)
 						if err != nil {
-							logger.WithError(err).Error("failed to process row batch with listeners")
+							batchLogger.WithError(err).Error("failed to process row batch with listeners")
 							return err
 						}
 					}
@@ -140,46 +145,96 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 				if err != nil {
 					switch e := err.(type) {
 					case BatchWriterVerificationFailed:
-						logger.WithField("incorrect_tables", e.table).Error(e.Error())
+						d.logger.WithField("incorrect_tables", e.table).Error(e.Error())
 						d.ErrorHandler.Fatal("inline_verifier", err)
 					default:
-						logger.WithError(err).Error("failed to iterate table")
+						d.logger.WithError(err).Error("failed to iterate table")
 						d.ErrorHandler.Fatal("data_iterator", err)
 					}
 
 				}
-
-				logger.Debug("table iteration completed")
-
-				// Right now the BatchWriter.WriteRowBatch happens synchronously in
-				// this method. If it ever becomes async, this MarkTableAsCompleted
-				// call MUST be done in WriteRowBatch somehow.
-				d.StateTracker.MarkTableAsCompleted(table.String())
 			}
 		}()
 	}
 
-	i := 0
-	loggingIncrement := len(tablesWithData) / 50
-	if loggingIncrement == 0 {
-		loggingIncrement = 1
-	}
+	for _, key := range d.paginationKeys {
+		tableName := key.table.String()
+		stateBatches, loadBatchesFromState := d.StateTracker.batchProgress[tableName]
 
-	for table, _ := range tablesWithData {
-		tablesQueue <- table
-		i++
-		if i%loggingIncrement == 0 {
-			d.logger.WithField("table", table.String()).Infof("queued table for processing (%d/%d)", i, len(tablesWithData))
+		if loadBatchesFromState {
+			for batchIndex, batch := range stateBatches {
+				if batch.Completed {
+					continue
+				}
+
+				batchQueue <- &PaginationKey{
+					table:              key.table,
+					startPaginationKey: batch.LatestPaginationKey,
+					endPaginationKey:   batch.EndPaginationKey,
+					batchIndex:         batchIndex,
+				}
+			}
+		} else {
+			// Set start to minus one since cursor is searching for greater values
+			tableStartPaginationKey := key.startPaginationKey - 1
+			tableEndPaginationKey := key.endPaginationKey
+
+			// Number of batches are set to number of processes, unless each batch becomes smaller than the cursor size
+			keyInterval := tableEndPaginationKey - tableStartPaginationKey
+			batchSize := Max(keyInterval/uint64(d.Concurrency), d.CursorConfig.BatchSize)
+
+			d.logger.WithFields(logrus.Fields{
+				"table":              tableName,
+				"batchSize":          batchSize,
+				"endPaginationKey":   tableEndPaginationKey,
+				"startPaginationKey": tableStartPaginationKey,
+			}).Debugf("queueing %d batches", (keyInterval/batchSize)+1)
+
+			for batchStartPaginationKey := tableStartPaginationKey; batchStartPaginationKey < tableEndPaginationKey; batchStartPaginationKey += batchSize {
+				batchEndPaginationKey := batchStartPaginationKey + batchSize
+				batchIndex := (batchStartPaginationKey - tableStartPaginationKey) / batchSize
+
+				// Set batchEndPaginationKey to endPaginationKey if out of bounds
+				if batchEndPaginationKey > tableEndPaginationKey {
+					batchEndPaginationKey = tableEndPaginationKey
+				}
+
+				paginationKey := &PaginationKey{
+					table:              key.table,
+					startPaginationKey: batchStartPaginationKey,
+					endPaginationKey:   batchEndPaginationKey,
+					batchIndex:         batchIndex,
+				}
+
+				d.StateTracker.RegisterBatch(tableName, paginationKey.batchIndex, paginationKey.startPaginationKey, paginationKey.endPaginationKey)
+				batchQueue <- paginationKey
+
+				// Protect against uint64 overflow, this might happen if the table is full
+				if batchStartPaginationKey >= (^uint64(0) - batchSize) {
+					batchSize = ^uint64(0) - batchStartPaginationKey
+					if batchSize == 0 {
+						break
+					}
+				}
+			}
 		}
 	}
 
-	d.logger.Info("done queueing tables to be iterated, closing table channel")
-	close(tablesQueue)
+	d.logger.Info("done queueing tables to be iterated")
+	close(batchQueue)
 
 	wg.Wait()
 	for _, listener := range d.doneListeners {
 		listener()
 	}
+}
+
+func (d *DataIterator) GetPaginationKeys(table string) (uint64, uint64) {
+	if paginationKey, ok := d.paginationKeys[table]; ok {
+		return paginationKey.startPaginationKey, paginationKey.endPaginationKey
+	}
+
+	return 0, 0
 }
 
 func (d *DataIterator) AddBatchListener(listener func(*RowBatch) error) {

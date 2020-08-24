@@ -116,7 +116,8 @@ func (w *BatchWriter) WriteRowBatch(batch *RowBatch) error {
 		// Note that the state tracker expects us the track based on the original
 		// database and table names as opposed to the target ones.
 		if w.StateTracker != nil {
-			w.StateTracker.UpdateLastSuccessfulPaginationKey(batch.TableSchema().String(), endPaginationKeypos)
+			w.logger.WithField("position", endPaginationKeypos).Debug("updating batch position in state")
+			w.StateTracker.UpdateBatchPosition(batch.TableName(), batch.BatchIndex(), endPaginationKeypos)
 		}
 
 		return nil

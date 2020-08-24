@@ -1,5 +1,6 @@
 require "logger"
 require "mysql2"
+require "connection_pool"
 
 module DbHelper
   ALPHANUMERICS = ("0".."9").to_a + ("a".."z").to_a + ("A".."Z").to_a
@@ -79,7 +80,9 @@ module DbHelper
   def initialize_db_connections
     @connections = {}
     DB_PORTS.each do |name, port|
-      @connections[name] = Mysql2::Client.new(default_db_config(port: port))
+      @connections[name] = ConnectionPool::Wrapper.new(:size => 5) {
+        Mysql2::Client.new(default_db_config(port: port))
+      }
     end
   end
 
@@ -120,7 +123,7 @@ module DbHelper
     dbtable = full_table_name(database_name, table_name)
 
     connection.query("CREATE DATABASE IF NOT EXISTS #{database_name}")
-    connection.query("CREATE TABLE IF NOT EXISTS #{dbtable} (id bigint(20) not null auto_increment, data TEXT, primary key(id))")
+    connection.query("CREATE TABLE #{dbtable} (id bigint(20) not null auto_increment, data TEXT, primary key(id))")
 
     return if number_of_rows == 0
 

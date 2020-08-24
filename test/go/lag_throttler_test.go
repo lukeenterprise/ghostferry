@@ -45,7 +45,7 @@ func setupLagTable(db *sql.DB, ctx context.Context) {
 func setLag(throttler *ghostferry.LagThrottler, serverId int, lag float32) {
 	_, err := throttler.DB.Exec("INSERT INTO meta.lag_table (lag, server_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE lag = ?", lag, serverId, lag)
 	testhelpers.PanicIfError(err)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 }
 
 func TestThrottlerThrottlesAndUnthrottles(t *testing.T) {

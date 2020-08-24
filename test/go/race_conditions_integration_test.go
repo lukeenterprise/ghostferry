@@ -139,7 +139,7 @@ func TestOnlyDeleteRowWithMaxPaginationKey(t *testing.T) {
 	testcase := &testhelpers.IntegrationTestCase{
 		T: t,
 		SetupAction: func(f *testhelpers.TestFerry, sourceDB, targetDB *sql.DB) {
-			testhelpers.SeedInitialData(sourceDB, "gftest", "table1", 2)
+			testhelpers.SeedInitialData(sourceDB, "gftest", "table1", 10)
 			testhelpers.SeedInitialData(targetDB, "gftest", "table1", 0)
 		},
 		Ferry: testhelpers.NewTestFerry(),

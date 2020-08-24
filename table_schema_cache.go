@@ -24,6 +24,11 @@ type TableIdentifier struct {
 	TableName  string
 }
 
+type MinMaxKeys struct {
+	MinPaginationKey uint64
+	MaxPaginationKey uint64
+}
+
 func NewTableIdentifierFromSchemaTable(table *TableSchema) TableIdentifier {
 	return TableIdentifier{
 		SchemaName: table.Schema,
@@ -116,14 +121,14 @@ func QuotedTableNameFromString(database, table string) string {
 	return fmt.Sprintf("`%s`.`%s`", database, table)
 }
 
-func MaxPaginationKeys(db *sql.DB, tables []*TableSchema, logger *logrus.Entry) (map[*TableSchema]uint64, []*TableSchema, error) {
-	tablesWithData := make(map[*TableSchema]uint64)
+func MinMaxPaginationKeys(db *sql.DB, tables []*TableSchema, logger *logrus.Entry) (map[*TableSchema]*MinMaxKeys, []*TableSchema, error) {
+	tablesWithData := make(map[*TableSchema]*MinMaxKeys)
 	emptyTables := make([]*TableSchema, 0, len(tables))
 
 	for _, table := range tables {
 		logger := logger.WithField("table", table.String())
 
-		maxPaginationKey, maxPaginationKeyExists, err := maxPaginationKey(db, table)
+		maxPaginationKey, maxPaginationKeyExists, err := getPaginationKeyValue(db, table, false)
 		if err != nil {
 			logger.WithError(err).Errorf("failed to get max primary key %s", table.GetPaginationColumn().Name)
 			return tablesWithData, emptyTables, err
@@ -135,7 +140,16 @@ func MaxPaginationKeys(db *sql.DB, tables []*TableSchema, logger *logrus.Entry) 
 			continue
 		}
 
-		tablesWithData[table] = maxPaginationKey
+		minPaginationKey, _, err := getPaginationKeyValue(db, table, true)
+		if err != nil {
+			logger.WithError(err).Errorf("failed to get min primary key %s", table.GetPaginationColumn().Name)
+			return tablesWithData, emptyTables, err
+		}
+
+		tablesWithData[table] = &MinMaxKeys{
+			MinPaginationKey: minPaginationKey,
+			MaxPaginationKey: maxPaginationKey,
+		}
 	}
 
 	return tablesWithData, emptyTables, nil
@@ -365,13 +379,21 @@ func showTablesFrom(c *sql.DB, dbname string) ([]string, error) {
 	return tables, nil
 }
 
-func maxPaginationKey(db *sql.DB, table *TableSchema) (uint64, bool, error) {
+func getPaginationKeyValue(db *sql.DB, table *TableSchema, ascending bool) (uint64, bool, error) {
+	var sortOrder string
 	primaryKeyColumn := table.GetPaginationColumn()
 	paginationKeyName := quoteField(primaryKeyColumn.Name)
+
+	if ascending {
+		sortOrder = "ASC"
+	} else {
+		sortOrder = "DESC"
+	}
+
 	query, args, err := sq.
 		Select(paginationKeyName).
 		From(QuotedTableName(table)).
-		OrderBy(fmt.Sprintf("%s DESC", paginationKeyName)).
+		OrderBy(fmt.Sprintf("%s %s", paginationKeyName, sortOrder)).
 		Limit(1).
 		ToSql()
 
@@ -379,8 +401,8 @@ func maxPaginationKey(db *sql.DB, table *TableSchema) (uint64, bool, error) {
 		return 0, false, err
 	}
 
-	var maxPaginationKey uint64
-	err = db.QueryRow(query, args...).Scan(&maxPaginationKey)
+	var paginationKey uint64
+	err = db.QueryRow(query, args...).Scan(&paginationKey)
 
 	switch {
 	case err == sqlorig.ErrNoRows:
@@ -388,6 +410,6 @@ func maxPaginationKey(db *sql.DB, table *TableSchema) (uint64, bool, error) {
 	case err != nil:
 		return 0, false, err
 	default:
-		return maxPaginationKey, true, nil
+		return paginationKey, true, nil
 	}
 }

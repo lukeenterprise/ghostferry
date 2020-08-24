@@ -58,7 +58,11 @@ class GhostferryTestCase < Minitest::Test
   end
 
   def new_ghostferry_with_interrupt_after_row_copy(filename, config: {}, after_batches_written: 0)
-    g = new_ghostferry(filename, config)
+    unless config.include?(:data_iteration_concurrency)
+      config[:data_iteration_concurrency] = "1"
+    end
+
+    g = new_ghostferry(filename, config: config)
 
     batches_written = 0
     g.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
@@ -162,8 +166,8 @@ class GhostferryTestCase < Minitest::Test
     refute dumped_state.nil?
     refute dumped_state["GhostferryVersion"].nil?
     refute dumped_state["LastKnownTableSchemaCache"].nil?
-    refute dumped_state["LastSuccessfulPaginationKeys"].nil?
     refute dumped_state["CompletedTables"].nil?
+    refute dumped_state["BatchProgress"].nil?
     refute dumped_state["LastWrittenBinlogPosition"].nil?
   end
 

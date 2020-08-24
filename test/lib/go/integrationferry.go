@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -209,6 +210,15 @@ func NewStandardConfig() (*ghostferry.Config, error) {
 	integrationPort := os.Getenv(portEnvName)
 	if integrationPort == "" {
 		return nil, fmt.Errorf("environment variable %s must be specified", portEnvName)
+	}
+
+	dataIterationConcurrency := os.Getenv("GHOSTFERRY_DATA_ITERATION_CONCURRENCY")
+	if len(dataIterationConcurrency) > 0 {
+		dataIterationConcurrencyInt, err := strconv.Atoi(dataIterationConcurrency)
+		if err != nil {
+			return nil, err
+		}
+		config.DataIterationConcurrency = dataIterationConcurrencyInt
 	}
 
 	config.ProgressCallback = ghostferry.HTTPCallback{

@@ -16,7 +16,6 @@ class CallbacksTest < GhostferryTestCase
 
     assert_equal "done", progress.last["CurrentState"]
 
-    assert_equal 1111, progress.last["Tables"]["gftest.test_table_1"]["LastSuccessfulPaginationKey"]
     assert_equal 1111, progress.last["Tables"]["gftest.test_table_1"]["TargetPaginationKey"]
     assert_equal "completed", progress.last["Tables"]["gftest.test_table_1"]["CurrentAction"]
 
@@ -25,12 +24,11 @@ class CallbacksTest < GhostferryTestCase
     assert progress.last["BinlogStreamerLag"] > 0
     assert_equal progress.last["LastSuccessfulBinlogPos"], progress.last["FinalBinlogPos"]
 
-    assert progress.last["VerifierMessage"].start_with?("BinlogVerifyStore.currentRowCount =")
-
     assert_equal false, progress.last["Throttled"]
 
-    refute progress.last["PaginationKeysPerSecond"].nil?
-    refute progress.last["ETA"].nil?
+    assert_equal "Inline", progress.last["VerifierType"]
+    assert progress.last["VerifierMessage"].start_with?("BinlogVerifyStore.currentRowCount =")
+
     assert progress.last["TimeTaken"] > 0
   end
 end

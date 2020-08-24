@@ -1,12 +1,10 @@
 package ghostferry
 
 import (
-	"container/ring"
-	"math"
 	"sync"
-	"time"
 
 	"github.com/siddontang/go-mysql/mysql"
+	"github.com/sirupsen/logrus"
 )
 
 // StateTracker design
@@ -34,8 +32,9 @@ type SerializableState struct {
 	GhostferryVersion         string
 	LastKnownTableSchemaCache TableSchemaCache
 
-	LastSuccessfulPaginationKeys              map[string]uint64
-	CompletedTables                           map[string]bool
+	CompletedTables map[string]bool
+	BatchProgress   map[string]map[uint64]*BatchProgress
+
 	LastWrittenBinlogPosition                 mysql.Position
 	BinlogVerifyStore                         BinlogVerifySerializedStore
 	LastStoredBinlogPositionForInlineVerifier mysql.Position
@@ -59,24 +58,19 @@ func (s *SerializableState) MinSourceBinlogPosition() mysql.Position {
 	}
 }
 
-// For tracking the speed of the copy
-type PaginationKeyPositionLog struct {
-	Position uint64
-	At       time.Time
-}
+func (s *SerializableState) CalculateTableProgress(table string) uint64 {
+	var totalPercentage uint64 = 0
 
-func newSpeedLogRing(speedLogCount int) *ring.Ring {
-	if speedLogCount <= 0 {
-		return nil
+	batches, ok := s.BatchProgress[table]
+	if !ok {
+		return 0
 	}
 
-	speedLog := ring.New(speedLogCount)
-	speedLog.Value = PaginationKeyPositionLog{
-		Position: 0,
-		At:       time.Now(),
+	for _, batch := range batches {
+		totalPercentage += batch.completedPercentage
 	}
 
-	return speedLog
+	return totalPercentage / uint64(len(batches))
 }
 
 type StateTracker struct {
@@ -87,29 +81,38 @@ type StateTracker struct {
 	lastStoredBinlogPositionForInlineVerifier mysql.Position
 	lastStoredBinlogPositionForTargetVerifier mysql.Position
 
-	lastSuccessfulPaginationKeys map[string]uint64
-	completedTables              map[string]bool
+	completedTables map[string]bool
+	batchProgress   map[string]map[uint64]*BatchProgress
 
-	iterationSpeedLog *ring.Ring
+	logger *logrus.Entry
 }
 
-func NewStateTracker(speedLogCount int) *StateTracker {
+type BatchProgress struct {
+	StartPaginationKey  uint64
+	EndPaginationKey    uint64
+	LatestPaginationKey uint64
+	Completed           bool
+	completedPercentage uint64
+}
+
+func NewStateTracker() *StateTracker {
 	return &StateTracker{
 		BinlogRWMutex: &sync.RWMutex{},
 		CopyRWMutex:   &sync.RWMutex{},
 
-		lastSuccessfulPaginationKeys: make(map[string]uint64),
-		completedTables:              make(map[string]bool),
-		iterationSpeedLog:            newSpeedLogRing(speedLogCount),
+		completedTables: make(map[string]bool),
+		batchProgress:   make(map[string]map[uint64]*BatchProgress),
+
+		logger: logrus.WithField("tag", "state_tracker"),
 	}
 }
 
 // serializedState is a state the tracker should start from, as opposed to
 // starting from the beginning.
-func NewStateTrackerFromSerializedState(speedLogCount int, serializedState *SerializableState) *StateTracker {
-	s := NewStateTracker(speedLogCount)
-	s.lastSuccessfulPaginationKeys = serializedState.LastSuccessfulPaginationKeys
+func NewStateTrackerFromSerializedState(serializedState *SerializableState) *StateTracker {
+	s := NewStateTracker()
 	s.completedTables = serializedState.CompletedTables
+	s.batchProgress = serializedState.BatchProgress
 	s.lastWrittenBinlogPosition = serializedState.LastWrittenBinlogPosition
 	s.lastStoredBinlogPositionForInlineVerifier = serializedState.LastStoredBinlogPositionForInlineVerifier
 	s.lastStoredBinlogPositionForTargetVerifier = serializedState.LastStoredBinlogPositionForInlineVerifier
@@ -137,31 +140,90 @@ func (s *StateTracker) UpdateLastResumableBinlogPositionForTargetVerifier(pos my
 	s.lastStoredBinlogPositionForTargetVerifier = pos
 }
 
-func (s *StateTracker) UpdateLastSuccessfulPaginationKey(table string, paginationKey uint64) {
+func (s *StateTracker) RegisterBatch(table string, index uint64, startPaginationKey uint64, endPaginationKey uint64) {
 	s.CopyRWMutex.Lock()
 	defer s.CopyRWMutex.Unlock()
 
-	deltaPaginationKey := paginationKey - s.lastSuccessfulPaginationKeys[table]
-	s.lastSuccessfulPaginationKeys[table] = paginationKey
+	if _, ok := s.batchProgress[table]; !ok {
+		s.batchProgress[table] = make(map[uint64]*BatchProgress)
+	}
 
-	s.updateSpeedLog(deltaPaginationKey)
+	s.batchProgress[table][index] = &BatchProgress{
+		StartPaginationKey:  startPaginationKey,
+		EndPaginationKey:    endPaginationKey,
+		LatestPaginationKey: startPaginationKey,
+		Completed:           false,
+	}
 }
 
-func (s *StateTracker) LastSuccessfulPaginationKey(table string) uint64 {
-	s.CopyRWMutex.RLock()
-	defer s.CopyRWMutex.RUnlock()
+func (s *StateTracker) UpdateBatchPosition(table string, index uint64, latestPaginationKey uint64) {
+	s.CopyRWMutex.Lock()
 
-	_, found := s.completedTables[table]
-	if found {
-		return math.MaxUint64
+	logger := s.logger.WithField("table", table).WithField("batchIndex", index)
+
+	_, tableFound := s.batchProgress[table]
+	if !tableFound {
+		logger.Error("tried to mark non-existing batch as completed")
+		return
 	}
 
-	paginationKey, found := s.lastSuccessfulPaginationKeys[table]
-	if !found {
-		return 0
+	batch, batchFound := s.batchProgress[table][index]
+	if !batchFound {
+		logger.Error("tried to mark non-existing batch as completed")
+		return
 	}
 
-	return paginationKey
+	// Set latest key to EndPaginationKey if we are ahead due to a fragmented PK
+	batch.LatestPaginationKey = Min(latestPaginationKey, batch.EndPaginationKey)
+
+	if batch.EndPaginationKey == batch.LatestPaginationKey {
+		logger.Debug("marking batch as completed")
+		batch.Completed = true
+		batch.completedPercentage = 100
+	} else {
+		batch.completedPercentage = 100 * (batch.LatestPaginationKey - batch.StartPaginationKey) / (batch.EndPaginationKey - batch.StartPaginationKey)
+	}
+
+	s.CopyRWMutex.Unlock()
+
+	if s.areAllBatchesCompleted(table) {
+		logger.Info("marking table as done")
+		s.MarkTableAsCompleted(table)
+	}
+}
+
+func (s *StateTracker) IsBatchComplete(table string, index uint64) bool {
+	s.CopyRWMutex.Lock()
+	defer s.CopyRWMutex.Unlock()
+
+	if _, ok := s.batchProgress[table]; !ok {
+		return false
+	}
+
+	batch, ok := s.batchProgress[table][index]
+	if !ok {
+		return false
+	}
+
+	return batch.Completed
+}
+
+func (s *StateTracker) areAllBatchesCompleted(table string) bool {
+	s.CopyRWMutex.Lock()
+	defer s.CopyRWMutex.Unlock()
+
+	if _, ok := s.batchProgress[table]; !ok {
+		s.logger.WithField("table", table).Error("tried to get batch status for non-existing table")
+		return false
+	}
+
+	for _, progress := range s.batchProgress[table] {
+		if !progress.Completed {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (s *StateTracker) MarkTableAsCompleted(table string) {
@@ -178,47 +240,6 @@ func (s *StateTracker) IsTableComplete(table string) bool {
 	return s.completedTables[table]
 }
 
-// This is reasonably accurate if the rows copied are distributed uniformly
-// between paginationKey = 0 -> max(paginationKey). It would not be accurate if the distribution is
-// concentrated in a particular region.
-func (s *StateTracker) EstimatedPaginationKeysPerSecond() float64 {
-	if s.iterationSpeedLog == nil {
-		return 0.0
-	}
-
-	s.CopyRWMutex.RLock()
-	defer s.CopyRWMutex.RUnlock()
-
-	if s.iterationSpeedLog.Value.(PaginationKeyPositionLog).Position == 0 {
-		return 0.0
-	}
-
-	earliest := s.iterationSpeedLog
-	for earliest.Prev() != nil && earliest.Prev() != s.iterationSpeedLog && earliest.Prev().Value.(PaginationKeyPositionLog).Position != 0 {
-		earliest = earliest.Prev()
-	}
-
-	currentValue := s.iterationSpeedLog.Value.(PaginationKeyPositionLog)
-	earliestValue := earliest.Value.(PaginationKeyPositionLog)
-	deltaPaginationKey := currentValue.Position - earliestValue.Position
-	deltaT := currentValue.At.Sub(earliestValue.At).Seconds()
-
-	return float64(deltaPaginationKey) / deltaT
-}
-
-func (s *StateTracker) updateSpeedLog(deltaPaginationKey uint64) {
-	if s.iterationSpeedLog == nil {
-		return
-	}
-
-	currentTotalPaginationKey := s.iterationSpeedLog.Value.(PaginationKeyPositionLog).Position
-	s.iterationSpeedLog = s.iterationSpeedLog.Next()
-	s.iterationSpeedLog.Value = PaginationKeyPositionLog{
-		Position: currentTotalPaginationKey + deltaPaginationKey,
-		At:       time.Now(),
-	}
-}
-
 func (s *StateTracker) Serialize(lastKnownTableSchemaCache TableSchemaCache, binlogVerifyStore *BinlogVerifyStore) *SerializableState {
 	s.BinlogRWMutex.RLock()
 	defer s.BinlogRWMutex.RUnlock()
@@ -229,8 +250,8 @@ func (s *StateTracker) Serialize(lastKnownTableSchemaCache TableSchemaCache, bin
 	state := &SerializableState{
 		GhostferryVersion:                         VersionString,
 		LastKnownTableSchemaCache:                 lastKnownTableSchemaCache,
-		LastSuccessfulPaginationKeys:              make(map[string]uint64),
 		CompletedTables:                           make(map[string]bool),
+		BatchProgress:                             make(map[string]map[uint64]*BatchProgress),
 		LastWrittenBinlogPosition:                 s.lastWrittenBinlogPosition,
 		LastStoredBinlogPositionForInlineVerifier: s.lastStoredBinlogPositionForInlineVerifier,
 		LastStoredBinlogPositionForTargetVerifier: s.lastStoredBinlogPositionForTargetVerifier,
@@ -240,15 +261,12 @@ func (s *StateTracker) Serialize(lastKnownTableSchemaCache TableSchemaCache, bin
 		state.BinlogVerifyStore = binlogVerifyStore.Serialize()
 	}
 
-	// Need a copy because lastSuccessfulPaginationKeys may change after Serialize
-	// returns. This would inaccurately reflect the state of Ghostferry when
-	// Serialize is called.
-	for k, v := range s.lastSuccessfulPaginationKeys {
-		state.LastSuccessfulPaginationKeys[k] = v
-	}
-
 	for k, v := range s.completedTables {
 		state.CompletedTables[k] = v
+	}
+
+	for batchIndex, progress := range s.batchProgress {
+		state.BatchProgress[batchIndex] = progress
 	}
 
 	return state

@@ -256,6 +256,10 @@ module GhostferryHelper
           environment["GHOSTFERRY_MARGINALIA"] = @config[:marginalia]
         end
 
+        if @config[:data_iteration_concurrency]
+          environment["GHOSTFERRY_DATA_ITERATION_CONCURRENCY"] = @config[:data_iteration_concurrency]
+        end
+
         @logger.debug("starting ghostferry test binary #{@compiled_binary_path}")
         Open3.popen3(environment, @compiled_binary_path) do |stdin, stdout, stderr, wait_thr|
           stdin.puts(resuming_state) unless resuming_state.nil?

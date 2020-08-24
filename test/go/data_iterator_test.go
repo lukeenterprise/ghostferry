@@ -2,6 +2,7 @@ package test
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 
@@ -54,13 +55,24 @@ func (this *DataIteratorTestSuite) SetupTest() {
 			BatchSize:   config.DataIterationBatchSize,
 			ReadRetries: config.DBReadRetries,
 		},
-		StateTracker: ghostferry.NewStateTracker(config.DataIterationConcurrency * 10),
+		StateTracker: ghostferry.NewStateTracker(),
 	}
 
 	this.receivedRows = make(map[string][]ghostferry.RowData, 0)
 
-	this.di.AddBatchListener(func(ev *ghostferry.RowBatch) error {
-		this.receivedRows[ev.TableSchema().Name] = append(this.receivedRows[ev.TableSchema().Name], ev.Values()...)
+	this.di.AddBatchListener(func(batch *ghostferry.RowBatch) error {
+		values := batch.Values()
+		if len(values) == 0 {
+			return nil
+		}
+
+		endPaginationKeypos, err := values[len(values)-1].GetUint64(batch.PaginationKeyIndex())
+		if err != nil {
+			return err
+		}
+
+		this.di.StateTracker.UpdateBatchPosition(batch.TableName(), batch.BatchIndex(), endPaginationKeypos)
+		this.receivedRows[batch.TableSchema().Name] = append(this.receivedRows[batch.TableSchema().Name], batch.Values()...)
 		return nil
 	})
 }
@@ -129,6 +141,11 @@ func (this *DataIteratorTestSuite) TestExistingRowsAreIterated() {
 	this.Require().Equal(5, len(this.receivedRows[testhelpers.TestCompressedTable1Name]))
 
 	for table, rows := range this.receivedRows {
+		// Sort receivedRows before comparison since iterator is async
+		sort.Slice(rows, func(i, j int) bool {
+			return rows[i][0].(int64) < rows[j][0].(int64)
+		})
+
 		for idx, row := range rows {
 			id := int64(row[0].(int64))
 			datum := string(row[1].([]byte))
@@ -139,11 +156,11 @@ func (this *DataIteratorTestSuite) TestExistingRowsAreIterated() {
 	}
 
 	this.Require().Equal(
-		this.completedTables(),
 		map[string]bool{
 			fmt.Sprintf("%s.%s", testhelpers.TestSchemaName, testhelpers.TestTable1Name):           true,
 			fmt.Sprintf("%s.%s", testhelpers.TestSchemaName, testhelpers.TestCompressedTable1Name): true,
 		},
+		this.completedTables(),
 	)
 }
 
