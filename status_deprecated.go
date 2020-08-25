@@ -15,8 +15,6 @@ type TableStatusDeprecated struct {
 	TableName           string
 	PaginationKeyName   string
 	Status              string
-	StartPaginationKey  uint64
-	TargetPaginationKey uint64
 	CompletedPercentage uint64
 }
 
@@ -139,36 +137,28 @@ func FetchStatusDeprecated(f *Ferry, v Verifier) *StatusDeprecated {
 	sort.Strings(waitingTableNames)
 
 	for _, tableName := range completedTableNames {
-		startPaginationKey, endPaginationKey := f.DataIterator.GetPaginationKeys(tableName)
-
 		status.TableStatuses = append(status.TableStatuses, &TableStatusDeprecated{
 			TableName:           tableName,
 			PaginationKeyName:   f.Tables[tableName].GetPaginationColumn().Name,
 			Status:              "complete",
-			StartPaginationKey:  startPaginationKey,
-			TargetPaginationKey: endPaginationKey,
 			CompletedPercentage: 100,
 		})
 	}
 
 	for _, tableName := range copyingTableNames {
-		_, endPaginationKey := f.DataIterator.GetPaginationKeys(tableName)
 		status.TableStatuses = append(status.TableStatuses, &TableStatusDeprecated{
 			TableName:           tableName,
 			PaginationKeyName:   f.Tables[tableName].GetPaginationColumn().Name,
 			Status:              "copying",
-			TargetPaginationKey: endPaginationKey,
 			CompletedPercentage: serializedState.CalculateTableProgress(tableName),
 		})
 	}
 
 	for _, tableName := range waitingTableNames {
-		_, endPaginationKey := f.DataIterator.GetPaginationKeys(tableName)
 		status.TableStatuses = append(status.TableStatuses, &TableStatusDeprecated{
 			TableName:           tableName,
 			PaginationKeyName:   f.Tables[tableName].GetPaginationColumn().Name,
 			Status:              "waiting",
-			TargetPaginationKey: endPaginationKey,
 			CompletedPercentage: 0,
 		})
 	}

@@ -229,14 +229,6 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 	}
 }
 
-func (d *DataIterator) GetPaginationKeys(table string) (uint64, uint64) {
-	if paginationKey, ok := d.paginationKeys[table]; ok {
-		return paginationKey.startPaginationKey, paginationKey.endPaginationKey
-	}
-
-	return 0, 0
-}
-
 func (d *DataIterator) AddBatchListener(listener func(*RowBatch) error) {
 	d.batchListeners = append(d.batchListeners, listener)
 }
