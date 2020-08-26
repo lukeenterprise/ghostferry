@@ -116,8 +116,14 @@ func (w *BatchWriter) WriteRowBatch(batch *RowBatch) error {
 		// Note that the state tracker expects us the track based on the original
 		// database and table names as opposed to the target ones.
 		if w.StateTracker != nil {
-			w.logger.WithField("position", endPaginationKeypos).Debug("updating batch position in state")
-			w.StateTracker.UpdateBatchPosition(batch.TableName(), batch.BatchIndex(), endPaginationKeypos)
+			tableName := batch.TableName()
+			batchIndex := batch.BatchIndex()
+			w.logger.WithFields(logrus.Fields{
+				"table":      tableName,
+				"position":   endPaginationKeypos,
+				"batchIndex": batchIndex,
+			}).Debug("updating batch position in state")
+			w.StateTracker.UpdateBatchPosition(tableName, batchIndex, endPaginationKeypos)
 		}
 
 		return nil

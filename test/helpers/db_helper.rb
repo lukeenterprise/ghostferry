@@ -143,7 +143,7 @@ module DbHelper
 
   def seed_simple_database_with_single_table
     # Setup the source database with data.
-    max_id = 1111
+    max_id = 5000
     seed_random_data(source_db, number_of_rows: max_id)
 
     # Create some holes in the data.

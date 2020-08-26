@@ -139,12 +139,14 @@ func TestOnlyDeleteRowWithMaxPaginationKey(t *testing.T) {
 	testcase := &testhelpers.IntegrationTestCase{
 		T: t,
 		SetupAction: func(f *testhelpers.TestFerry, sourceDB, targetDB *sql.DB) {
-			testhelpers.SeedInitialData(sourceDB, "gftest", "table1", 10)
+			testhelpers.SeedInitialData(sourceDB, "gftest", "table1", 2)
 			testhelpers.SeedInitialData(targetDB, "gftest", "table1", 0)
 		},
 		Ferry: testhelpers.NewTestFerry(),
 	}
 
+	// Set concurrency to 1 to avoid deadlocking the delete query with SELECT FOR UPDATE
+	testcase.Ferry.DataIterationConcurrency = 1
 	testcase.Ferry.DataIterationBatchSize = 1
 
 	lastRowDeleted := false
