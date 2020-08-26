@@ -540,7 +540,7 @@ class InlineVerifierTest < GhostferryTestCase
     end
   end
 
-  def seed_random_data_in_composite_pk_table(connection, database_name: DEFAULT_DB, table_name: DEFAULT_TABLE, number_of_rows: 1111)
+  def seed_random_data_in_composite_pk_table(connection, database_name: DEFAULT_DB, table_name: DEFAULT_TABLE, number_of_rows: 5000)
     dbtable = full_table_name(database_name, table_name)
 
     connection.query("CREATE DATABASE IF NOT EXISTS #{database_name}")
