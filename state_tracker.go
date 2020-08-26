@@ -180,15 +180,15 @@ func (s *StateTracker) UpdateBatchPosition(table string, index uint64, latestPag
 		logger.Debug("marking batch as completed")
 		batch.Completed = true
 		batch.completedPercentage = 100
+		s.CopyRWMutex.Unlock()
+
+		if s.areAllBatchesCompleted(table) {
+			logger.Info("marking table as done")
+			s.MarkTableAsCompleted(table)
+		}
 	} else {
 		batch.completedPercentage = 100 * (batch.LatestPaginationKey - batch.StartPaginationKey) / (batch.EndPaginationKey - batch.StartPaginationKey)
-	}
-
-	s.CopyRWMutex.Unlock()
-
-	if s.areAllBatchesCompleted(table) {
-		logger.Info("marking table as done")
-		s.MarkTableAsCompleted(table)
+		s.CopyRWMutex.Unlock()
 	}
 }
 
