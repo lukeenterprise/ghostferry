@@ -91,7 +91,10 @@ func FetchStatusDeprecated(f *Ferry, v Verifier) *StatusDeprecated {
 	status.TotalTableCount = len(f.Tables)
 
 	status.DataIteratorSpeed = uint64(serializedState.estimatedPaginationKeysPerSecond)
-	status.DataIteratorETA = time.Duration(serializedState.CalculateKeysWaitingForCopy()/status.DataIteratorSpeed) * time.Second
+
+	if status.DataIteratorSpeed > 0 {
+		status.DataIteratorETA = time.Duration(serializedState.CalculateKeysWaitingForCopy()/status.DataIteratorSpeed) * time.Second
+	}
 
 	status.AllTableNames = f.Tables.AllTableNames()
 	sort.Strings(status.AllTableNames)
@@ -112,26 +115,14 @@ func FetchStatusDeprecated(f *Ferry, v Verifier) *StatusDeprecated {
 	copyingTableNames := make([]string, 0, len(f.Tables))
 	waitingTableNames := make([]string, 0, len(f.Tables))
 
-	for tableName, _ := range completedTables {
-		completedTableNames = append(completedTableNames, tableName)
-	}
-
 	for _, tableName := range status.AllTableNames {
 		if _, ok := completedTables[tableName]; ok {
-			continue // already completed, therefore not copying
+			completedTableNames = append(completedTableNames, tableName)
+			continue
 		}
 
-		copyingTableNames = append(copyingTableNames, tableName)
-	}
-
-	for tableName, _ := range f.Tables {
 		if _, ok := serializedState.BatchProgress[tableName]; ok {
-			continue // already started, therefore not waiting
-		}
-
-		if _, ok := completedTables[tableName]; ok {
-			// There are no data in that table, thus it does not have an entry in
-			// lastSuccessfulPaginationKeys but has an entry in completedTables
+			copyingTableNames = append(copyingTableNames, tableName)
 			continue
 		}
 
