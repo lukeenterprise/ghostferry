@@ -1,6 +1,7 @@
 package ghostferry
 
 import (
+	"math"
 	"sync"
 
 	"github.com/siddontang/go-mysql/mysql"
@@ -174,7 +175,7 @@ func (s *StateTracker) UpdateBatchPosition(table string, index uint64, latestPag
 	}
 
 	// Set latest key to EndPaginationKey if we are ahead due to a fragmented PK
-	batch.LatestPaginationKey = Min(latestPaginationKey, batch.EndPaginationKey)
+	batch.LatestPaginationKey = uint64(math.Min(float64(latestPaginationKey), float64(batch.EndPaginationKey)))
 
 	if batch.EndPaginationKey == batch.LatestPaginationKey {
 		logger.Debug("marking batch as completed")

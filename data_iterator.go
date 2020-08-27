@@ -2,6 +2,7 @@ package ghostferry
 
 import (
 	sql "github.com/Shopify/ghostferry/sqlwrapper"
+	"math"
 	"sync"
 
 	"github.com/sirupsen/logrus"
@@ -198,7 +199,8 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 
 			// Number of batches are set to number of processes, unless each batch becomes smaller than the cursor size
 			keyInterval := tableEndPaginationKey - tableStartPaginationKey
-			batchSize := Max(keyInterval/uint64(d.Concurrency), d.CursorConfig.BatchSize)
+			concurrencyBatchSize := math.Ceil(float64(keyInterval) / float64(d.Concurrency))
+			batchSize := uint64(math.Max(concurrencyBatchSize, float64(d.CursorConfig.BatchSize)))
 
 			d.logger.WithFields(logrus.Fields{
 				"table":              tableName,
