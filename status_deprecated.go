@@ -43,6 +43,9 @@ type StatusDeprecated struct {
 	AllTableNames       []string
 	AllDatabaseNames    []string
 
+	DataIteratorSpeed uint64
+	DataIteratorETA   time.Duration
+
 	VerifierSupport     bool
 	VerifierAvailable   bool
 	VerifierMessage     string
@@ -86,6 +89,9 @@ func FetchStatusDeprecated(f *Ferry, v Verifier) *StatusDeprecated {
 
 	status.CompletedTableCount = len(completedTables)
 	status.TotalTableCount = len(f.Tables)
+
+	status.DataIteratorSpeed = uint64(serializedState.estimatedPaginationKeysPerSecond)
+	status.DataIteratorETA = time.Duration(serializedState.CalculateKeysWaitingForCopy()/status.DataIteratorSpeed) * time.Second
 
 	status.AllTableNames = f.Tables.AllTableNames()
 	sort.Strings(status.AllTableNames)
