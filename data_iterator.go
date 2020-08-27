@@ -7,6 +7,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+type GracefulShutdownError struct{}
+
+func (e GracefulShutdownError) Error() string {
+	return "graceful shutdown"
+}
+
 type PaginationKey struct {
 	table              *TableSchema
 	batchIndex         uint64
@@ -22,6 +28,9 @@ type DataIterator struct {
 	ErrorHandler ErrorHandler
 	CursorConfig *CursorConfig
 	StateTracker *StateTracker
+
+	gracefulShutdown bool
+	batchWaitGroup   *sync.WaitGroup
 
 	paginationKeys map[string]*PaginationKey
 	batchListeners []func(*RowBatch) error
@@ -67,12 +76,13 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 	}
 
 	batchQueue := make(chan *PaginationKey)
-	wg := &sync.WaitGroup{}
-	wg.Add(d.Concurrency)
+
+	d.batchWaitGroup = &sync.WaitGroup{}
+	d.batchWaitGroup.Add(d.Concurrency)
 
 	for i := 0; i < d.Concurrency; i++ {
 		go func() {
-			defer wg.Done()
+			defer d.batchWaitGroup.Done()
 
 			for {
 				PaginationKey, ok := <-batchQueue
@@ -137,6 +147,10 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 							batchLogger.WithError(err).Error("failed to process row batch with listeners")
 							return err
 						}
+
+						if d.gracefulShutdown {
+							return GracefulShutdownError{}
+						}
 					}
 
 					return nil
@@ -144,6 +158,9 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 
 				if err != nil {
 					switch e := err.(type) {
+					case GracefulShutdownError:
+						d.logger.Warn("received gracefully shutdown signal")
+						return
 					case BatchWriterVerificationFailed:
 						d.logger.WithField("incorrect_tables", e.table).Error(e.Error())
 						d.ErrorHandler.Fatal("inline_verifier", err)
@@ -223,10 +240,16 @@ func (d *DataIterator) Run(tables []*TableSchema) {
 	d.logger.Info("done queueing tables to be iterated")
 	close(batchQueue)
 
-	wg.Wait()
+	d.batchWaitGroup.Wait()
 	for _, listener := range d.doneListeners {
 		listener()
 	}
+}
+
+func (d *DataIterator) WaitForGracefulShutdown() {
+	d.logger.Warn("shutting down data iterator gracefully")
+	d.gracefulShutdown = true
+	d.batchWaitGroup.Wait()
 }
 
 func (d *DataIterator) AddBatchListener(listener func(*RowBatch) error) {

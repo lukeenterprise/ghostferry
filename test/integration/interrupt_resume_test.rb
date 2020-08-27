@@ -7,7 +7,10 @@ class InterruptResumeTest < GhostferryTestCase
   end
 
   def test_interrupt_resume_without_writes_to_source_to_check_target_state_when_interrupted
-    ghostferry = new_ghostferry(MINIMAL_GHOSTFERRY)
+    ghostferry = new_ghostferry(MINIMAL_GHOSTFERRY, config: {
+      # Set concurrency to 1 to make sure we process exactly one batch
+      data_iteration_concurrency: "1",
+    })
 
     # Writes one batch
     ghostferry.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
@@ -19,7 +22,6 @@ class InterruptResumeTest < GhostferryTestCase
 
     result = target_db.query("SELECT MAX(id) AS max_id FROM #{DEFAULT_FULL_TABLE_NAME}")
     last_successful_id = result.first["max_id"]
-    assert last_successful_id > 0
     assert_equal last_successful_id, dumped_state["BatchProgress"]["#{DEFAULT_DB}.#{DEFAULT_TABLE}"]["0"]["LatestPaginationKey"]
   end
 
@@ -50,12 +52,8 @@ class InterruptResumeTest < GhostferryTestCase
 
     start_datawriter_with_ghostferry(datawriter, ghostferry)
 
-    batches_written = 0
     ghostferry.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
-      batches_written += 1
-      if batches_written >= 2
-        ghostferry.send_signal("TERM")
-      end
+      ghostferry.send_signal("TERM")
     end
 
     dumped_state = ghostferry.run_expecting_interrupt
@@ -111,12 +109,8 @@ class InterruptResumeTest < GhostferryTestCase
 
     start_datawriter_with_ghostferry(datawriter, ghostferry)
 
-    batches_written = 0
     ghostferry.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
-      batches_written += 1
-      if batches_written >= 2
-        ghostferry.term_and_wait_for_exit
-      end
+      ghostferry.term_and_wait_for_exit
     end
 
     dumped_state = ghostferry.run_expecting_interrupt
@@ -131,12 +125,8 @@ class InterruptResumeTest < GhostferryTestCase
 
     start_datawriter_with_ghostferry(datawriter, ghostferry)
 
-    batches_written = 0
     ghostferry.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
-      batches_written += 1
-      if batches_written >= 2
-        ghostferry.term_and_wait_for_exit
-      end
+      ghostferry.term_and_wait_for_exit
     end
 
     dumped_state = ghostferry.run_expecting_interrupt
@@ -170,13 +160,10 @@ class InterruptResumeTest < GhostferryTestCase
     result = source_db.query("SELECT MAX(id) FROM #{DEFAULT_FULL_TABLE_NAME}")
     chosen_id = result.first["MAX(id)"] + 1
 
-    ghostferry = new_ghostferry(MINIMAL_GHOSTFERRY, config: { verifier_type: "Inline"})
+    ghostferry = new_ghostferry(MINIMAL_GHOSTFERRY, config: { verifier_type: "Inline" })
 
-    i = 0
     ghostferry.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
-      sleep if i >= 1 # block the DataIterator so it doesn't race with the term_and_wait_for_exit below.
       source_db.query("INSERT INTO #{DEFAULT_FULL_TABLE_NAME} (id, data) VALUES (#{chosen_id}, 'data')")
-      i += 1
     end
 
     ghostferry.on_status(Ghostferry::Status::AFTER_BINLOG_APPLY) do
@@ -216,16 +203,11 @@ class InterruptResumeTest < GhostferryTestCase
     result = source_db.query("SELECT MIN(id) FROM #{DEFAULT_FULL_TABLE_NAME}")
     chosen_id = result.first["MIN(id)"] + 1
 
-    i = 0
     ghostferry.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
-      if i == 1
-        # We need to delete it the second batch because trying to delete the
-        # minimum id row while in the first batch will result in a lock as the
-        # DataIterator holds a FOR UPDATE lock for the minimum id row.
-        source_db.query("DELETE FROM #{DEFAULT_FULL_TABLE_NAME} WHERE id = #{chosen_id}")
-      end
-      sleep if i > 1 # block the DataIterator so it doesn't race with the term_and_wait_for_exit below.
-      i += 1
+      # We need to delete it the second batch because trying to delete the
+      # minimum id row while in the first batch will result in a lock as the
+      # DataIterator holds a FOR UPDATE lock for the minimum id row.
+      source_db.query("DELETE FROM #{DEFAULT_FULL_TABLE_NAME} WHERE id = #{chosen_id}")
     end
 
     ghostferry.on_status(Ghostferry::Status::AFTER_BINLOG_APPLY) do
@@ -262,7 +244,7 @@ class InterruptResumeTest < GhostferryTestCase
   end
 
   def test_interrupt_resume_inline_verifier_will_verify_additional_rows_changed_on_source_during_interrupt
-    ghostferry = new_ghostferry(MINIMAL_GHOSTFERRY, config: { verifier_type: "Inline"})
+    ghostferry = new_ghostferry(MINIMAL_GHOSTFERRY, config: { verifier_type: "Inline" })
 
     ghostferry.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
       ghostferry.term_and_wait_for_exit

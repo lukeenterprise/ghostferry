@@ -595,7 +595,7 @@ func (f *Ferry) Run() {
 			if ctx.Err() == nil {
 				// Ghostferry is still running
 				if f.OverallState.Load() != StateCutover {
-					// Save state dump and exit if not during the cutover stage
+					f.DataIterator.WaitForGracefulShutdown()
 					f.ErrorHandler.Fatal("user_interrupt", fmt.Errorf("signal received: %v", s.String()))
 				} else {
 					// Log and ignore the signal during cutover
