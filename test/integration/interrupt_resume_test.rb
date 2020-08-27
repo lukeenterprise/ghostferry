@@ -195,19 +195,26 @@ class InterruptResumeTest < GhostferryTestCase
     assert_test_table_is_identical
   end
 
-  def x_test_interrupt_resume_inline_verifier_will_verify_entries_in_reverify_store
-    ghostferry = new_ghostferry(MINIMAL_GHOSTFERRY, config: { verifier_type: "Inline" })
+  def test_interrupt_resume_inline_verifier_will_verify_entries_in_reverify_store
+    ghostferry = new_ghostferry(MINIMAL_GHOSTFERRY, config: {
+      verifier_type: "Inline",
+      data_iteration_concurrency: "1",
+    })
 
     # This row would have been copied as we terminate ghostferry after 1 batch
     # is copied.
     result = source_db.query("SELECT MIN(id) FROM #{DEFAULT_FULL_TABLE_NAME}")
     chosen_id = result.first["MIN(id)"] + 1
 
+    i = 0
     ghostferry.on_status(Ghostferry::Status::AFTER_ROW_COPY) do
-      # We need to delete it the second batch because trying to delete the
-      # minimum id row while in the first batch will result in a lock as the
-      # DataIterator holds a FOR UPDATE lock for the minimum id row.
-      source_db.query("DELETE FROM #{DEFAULT_FULL_TABLE_NAME} WHERE id = #{chosen_id}")
+      if i == 1
+        # We need to delete it the second batch because trying to delete the
+        # minimum id row while in the first batch will result in a lock as the
+        # DataIterator holds a FOR UPDATE lock for the minimum id row.
+        source_db.query("DELETE FROM #{DEFAULT_FULL_TABLE_NAME} WHERE id = #{chosen_id}")
+      end
+      i += 1
     end
 
     ghostferry.on_status(Ghostferry::Status::AFTER_BINLOG_APPLY) do
