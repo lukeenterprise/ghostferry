@@ -72,13 +72,17 @@ func main() {
 	config := &copydb.Config{
 		Config: &ghostferry.Config{
 			Source: &ghostferry.DatabaseConfig{
-				Port: 3306,
-				User: "ghostferry",
+				Port:         3306,
+				User:         "ghostferry",
+				ReadTimeout:  30 * time.Second,
+				WriteTimeout: 30 * time.Second,
 			},
 
 			Target: &ghostferry.DatabaseConfig{
-				Port: 3306,
-				User: "ghostferry",
+				Port:         3306,
+				User:         "ghostferry",
+				ReadTimeout:  30 * time.Second,
+				WriteTimeout: 30 * time.Second,
 			},
 
 			MyServerId:        99399,

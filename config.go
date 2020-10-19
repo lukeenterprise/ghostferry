@@ -62,6 +62,9 @@ type DatabaseConfig struct {
 	Params    map[string]string
 	TLS       *TLSConfig
 
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+
 	// SQL annotations used to differentiate Ghostferry's DMLs
 	// against other actor's. This will default to the defaultMarginalia
 	// constant above if not set.
@@ -90,6 +93,8 @@ func (c *DatabaseConfig) MySQLConfig() (*mysql.Config, error) {
 		Params:               c.Params,
 		AllowNativePasswords: true,
 		MultiStatements:      true,
+		ReadTimeout:          c.ReadTimeout,
+		WriteTimeout:         c.WriteTimeout,
 	}
 
 	if c.TLS != nil {
